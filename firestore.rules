@@ -1,0 +1,94 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function signedInEmail() {
+      return isSignedIn() && request.auth.token.email != null
+        ? request.auth.token.email
+        : '';
+    }
+
+    function userProfile() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid));
+    }
+
+    function hasActiveProfile() {
+      return isSignedIn()
+        && exists(/databases/$(database)/documents/users/$(request.auth.uid))
+        && userProfile().data.status == 'active';
+    }
+
+    function isBootstrapAdmin() {
+      return signedInEmail() == 'manager@gmail.com';
+    }
+
+    function isAdmin() {
+      return hasActiveProfile()
+        && (userProfile().data.role in ['admin', 'administrator', 'owner', 'manager', 'superadmin']
+          || isBootstrapAdmin());
+    }
+
+    function belongsToStore(storeId) {
+      return hasActiveProfile()
+        && (userProfile().data.storeId == storeId || isAdmin());
+    }
+
+    function validOwnProfile(uid) {
+      return request.auth.uid == uid
+        && request.resource.data.email == request.auth.token.email
+        && request.resource.data.status == 'active'
+        && (
+          request.resource.data.role == 'cashier'
+          || (request.resource.data.role in ['admin', 'administrator', 'owner', 'manager', 'superadmin']
+            && isBootstrapAdmin())
+        );
+    }
+
+    match /users/{uid} {
+      allow create: if isSignedIn() && validOwnProfile(uid);
+      allow read: if isSignedIn() && (request.auth.uid == uid || isAdmin());
+      allow update: if isSignedIn()
+        && (
+          isAdmin()
+          || (
+            request.auth.uid == uid
+            && request.resource.data.diff(resource.data).changedKeys()
+              .hasOnly(['displayName', 'lastSeenAt'])
+          )
+        );
+      allow delete: if isAdmin();
+    }
+
+    match /artifacts/{namespace}/users/{storeId}/products/{productId} {
+      allow read: if belongsToStore(storeId);
+      allow create, update, delete: if isAdmin() && belongsToStore(storeId);
+    }
+
+    match /artifacts/{namespace}/users/{storeId}/sales/{saleId} {
+      allow read: if belongsToStore(storeId);
+      allow create: if belongsToStore(storeId)
+        && request.resource.data.cashierUid == request.auth.uid
+        && request.resource.data.totalAmount is number
+        && request.resource.data.totalAmount >= 0
+        && request.resource.data.items is list
+        && request.resource.data.items.size() > 0;
+      allow update, delete: if isAdmin() && belongsToStore(storeId);
+    }
+
+    match /artifacts/{namespace}/users/{storeId}/audit_logs/{logId} {
+      allow read: if isAdmin() && belongsToStore(storeId);
+      allow create: if belongsToStore(storeId)
+        && request.resource.data.actorUid == request.auth.uid
+        && request.resource.data.action is string;
+      allow update, delete: if false;
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
